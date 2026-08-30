@@ -3,30 +3,81 @@ import requests
 
 
 # ============================================================
-# LOAD ENVIRONMENT VARIABLES
-# ============================================================
-
-load_dotenv()
-
-
-# ============================================================
 # MONDAY.COM CONFIGURATION
 # ============================================================
 
 MONDAY_API_URL = "https://api.monday.com/v2"
 
+DEALS_BOARD_ID = 5030967822
+WORK_ORDERS_BOARD_ID = 5030967820
+
+
+# ============================================================
+# LOAD LOCAL ENVIRONMENT FILE
+# ============================================================
+
+def load_local_env():
+
+    env_file = ".env"
+
+    if not os.path.exists(env_file):
+        return
+
+    try:
+
+        with open(
+            env_file,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            for line in file:
+
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                if line.startswith("#"):
+                    continue
+
+                if "=" not in line:
+                    continue
+
+                key, value = line.split(
+                    "=",
+                    1
+                )
+
+                key = key.strip()
+                value = value.strip()
+
+                value = value.strip('"')
+                value = value.strip("'")
+
+                if key and value:
+
+                    os.environ.setdefault(
+                        key,
+                        value
+                    )
+
+    except Exception:
+        pass
+
+
+load_local_env()
+
+
+# ============================================================
+# GET MONDAY API TOKEN
+# ============================================================
 
 def get_monday_token():
-    """
-    Get the Monday.com API token.
 
-    Priority:
-    1. Streamlit Cloud Secrets
-    2. Local .env file
-    """
-
-    # Try Streamlit Cloud secrets
+    # Streamlit Cloud
     try:
+
         import streamlit as st
 
         token = st.secrets.get(
@@ -35,24 +86,26 @@ def get_monday_token():
         )
 
         if token:
-            return token
+
+            return str(token).strip()
 
     except Exception:
         pass
 
-    # Try environment variable
+    # Local .env
     token = os.getenv(
         "MONDAY_API_TOKEN"
     )
 
     if token:
-        return token
+
+        return token.strip()
 
     return None
 
 
 # ============================================================
-# API REQUEST
+# MONDAY API REQUEST
 # ============================================================
 
 def monday_request(
@@ -66,8 +119,7 @@ def monday_request(
 
         raise RuntimeError(
             "MONDAY_API_TOKEN is missing. "
-            "Add it to your .env file locally "
-            "or Streamlit Cloud Secrets."
+            "Add it to Streamlit Secrets or .env."
         )
 
     headers = {
@@ -80,26 +132,40 @@ def monday_request(
         "variables": variables or {}
     }
 
-    response = requests.post(
-        MONDAY_API_URL,
-        json=payload,
-        headers=headers,
-        timeout=60
-    )
+    try:
 
-    # HTTP error
-    response.raise_for_status()
+        response = requests.post(
+            MONDAY_API_URL,
+            json=payload,
+            headers=headers,
+            timeout=60
+        )
 
-    result = response.json()
+        response.raise_for_status()
 
-    # GraphQL errors
+    except requests.RequestException as e:
+
+        raise RuntimeError(
+            f"Could not connect to Monday.com: {e}"
+        )
+
+    try:
+
+        result = response.json()
+
+    except ValueError:
+
+        raise RuntimeError(
+            "Monday.com returned an invalid response."
+        )
+
     if "errors" in result:
 
-        error_messages = []
+        messages = []
 
         for error in result["errors"]:
 
-            error_messages.append(
+            messages.append(
                 error.get(
                     "message",
                     "Unknown Monday.com error"
@@ -108,7 +174,7 @@ def monday_request(
 
         raise RuntimeError(
             "Monday.com API error: "
-            + " | ".join(error_messages)
+            + " | ".join(messages)
         )
 
     return result
@@ -124,14 +190,13 @@ def get_board_items(
     limit=100
 ):
 
-    # --------------------------------------------------------
-    # First request
-    # --------------------------------------------------------
-
     if cursor is None:
 
         query = """
-        query ($board_id: ID!, $limit: Int!) {
+        query (
+            $board_id: ID!,
+            $limit: Int!
+        ) {
 
             boards(ids: [$board_id]) {
 
@@ -167,82 +232,71 @@ def get_board_items(
             variables
         )
 
-        boards = result.get(
-            "data",
-            {}
-        ).get(
-            "boards",
-            []
+        boards = (
+            result
+            .get("data", {})
+            .get("boards", [])
         )
 
         if not boards:
 
             raise RuntimeError(
-                f"Board {board_id} was not found."
+                f"Monday.com board {board_id} "
+                "could not be found."
             )
 
-        page = boards[0].get(
+        return boards[0].get(
             "items_page",
             {}
         )
 
-    # --------------------------------------------------------
-    # Next pages
-    # --------------------------------------------------------
+    query = """
+    query (
+        $cursor: String!,
+        $limit: Int!
+    ) {
 
-    else:
-
-        query = """
-        query (
-            $cursor: String!,
-            $limit: Int!
+        next_items_page(
+            cursor: $cursor,
+            limit: $limit
         ) {
 
-            next_items_page(
-                cursor: $cursor,
-                limit: $limit
-            ) {
+            cursor
 
-                cursor
+            items {
 
-                items {
+                id
+                name
 
+                column_values {
                     id
-                    name
-
-                    column_values {
-                        id
-                        text
-                        value
-                    }
+                    text
+                    value
                 }
             }
         }
-        """
+    }
+    """
 
-        variables = {
-            "cursor": cursor,
-            "limit": limit
-        }
+    variables = {
+        "cursor": cursor,
+        "limit": limit
+    }
 
-        result = monday_request(
-            query,
-            variables
-        )
+    result = monday_request(
+        query,
+        variables
+    )
 
-        page = result.get(
-            "data",
-            {}
-        ).get(
-            "next_items_page",
-            {}
-        )
-
-    return page
+    return (
+        result
+        .get("data", {})
+        .get("next_items_page", {})
+    )
 
 
 # ============================================================
-# GET ALL ITEMS FROM A BOARD
+# GET ALL BOARD ITEMS
 # ============================================================
 
 def get_all_board_items(
@@ -253,8 +307,6 @@ def get_all_board_items(
     all_items = []
 
     cursor = None
-
-    page_number = 1
 
     while True:
 
@@ -269,9 +321,7 @@ def get_all_board_items(
             []
         )
 
-        all_items.extend(
-            items
-        )
+        all_items.extend(items)
 
         print(
             f"Retrieved {len(items)} items "
@@ -282,15 +332,50 @@ def get_all_board_items(
             "cursor"
         )
 
-        # No more pages
         if not cursor:
             break
-
-        page_number += 1
 
     return {
         "items": all_items
     }
+
+
+# ============================================================
+# TEST CONNECTION
+# ============================================================
+
+def test_connection():
+
+    query = """
+    query {
+
+        me {
+
+            id
+            name
+            email
+
+        }
+    }
+    """
+
+    result = monday_request(
+        query
+    )
+
+    user = (
+        result
+        .get("data", {})
+        .get("me")
+    )
+
+    if not user:
+
+        raise RuntimeError(
+            "Monday.com authentication failed."
+        )
+
+    return user
 
 
 # ============================================================
@@ -310,9 +395,11 @@ def get_board_info(
             name
 
             columns {
+
                 id
                 title
                 type
+
             }
         }
     }
@@ -327,67 +414,29 @@ def get_board_info(
         variables
     )
 
-    boards = result.get(
-        "data",
-        {}
-    ).get(
-        "boards",
-        []
+    boards = (
+        result
+        .get("data", {})
+        .get("boards", [])
     )
 
     if not boards:
 
         raise RuntimeError(
-            f"Board {board_id} was not found."
+            f"Board {board_id} not found."
         )
 
     return boards[0]
 
 
 # ============================================================
-# TEST CONNECTION
-# ============================================================
-
-def test_connection():
-
-    query = """
-    query {
-        me {
-            id
-            name
-            email
-        }
-    }
-    """
-
-    result = monday_request(
-        query
-    )
-
-    user = result.get(
-        "data",
-        {}
-    ).get(
-        "me"
-    )
-
-    if not user:
-
-        raise RuntimeError(
-            "Could not authenticate with Monday.com."
-        )
-
-    return user
-
-
-# ============================================================
-# MAIN TEST
+# LOCAL TEST
 # ============================================================
 
 if __name__ == "__main__":
 
     print(
-        "\nTesting Monday.com connection..."
+        "Testing Monday.com connection..."
     )
 
     try:
@@ -413,12 +462,12 @@ if __name__ == "__main__":
         )
 
         deals = get_all_board_items(
-            5030967822
+            DEALS_BOARD_ID
         )
 
         print(
-            f"Deals retrieved: "
-            f"{len(deals['items'])}"
+            "Deals:",
+            len(deals["items"])
         )
 
         print(
@@ -426,16 +475,16 @@ if __name__ == "__main__":
         )
 
         work_orders = get_all_board_items(
-            5030967820
+            WORK_ORDERS_BOARD_ID
         )
 
         print(
-            f"Work Orders retrieved: "
-            f"{len(work_orders['items'])}"
+            "Work Orders:",
+            len(work_orders["items"])
         )
 
         print(
-            "\nMonday.com integration is working!"
+            "\nMonday.com integration working!"
         )
 
     except Exception as e:
@@ -444,6 +493,4 @@ if __name__ == "__main__":
             "\nERROR:"
         )
 
-        print(
-            str(e)
-        )
+        print(str(e))
